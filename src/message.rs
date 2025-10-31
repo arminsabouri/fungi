@@ -2,15 +2,15 @@ use crate::{
     cospend::CospendId,
     transaction::{Input, Output},
     wallet::WalletId,
-    Epoch,
+    TimeStep,
 };
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct RegisterInput {
     pub(crate) wallet_id: WalletId,
     pub(crate) input: Input,
-    /// If None, the input is valid forever, otherwise it is valid until the epoch in the option
-    pub(crate) valid_till: Option<Epoch>,
+    /// If None, the input is valid forever, otherwise it is valid until the timestep in the option
+    pub(crate) valid_till: Option<TimeStep>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]

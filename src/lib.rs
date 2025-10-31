@@ -135,39 +135,38 @@ enum CoinSelectionStrategy {
 struct PeerGraph(UnGraph<usize, ()>);
 
 /// Wrapper type for timestep index
-// TODO: rename to Timestep
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash, Default)]
-pub(crate) struct Epoch(usize);
+pub(crate) struct TimeStep(usize);
 
 #[derive(Debug)]
 struct SimulationBuilder {
     seed: u64,
     /// Number of wallets/agents in the simulation
     num_wallets: usize,
-    /// Total number of epochs for the simulation
-    max_epochs: usize,
-    /// How many blocks are mined between epochs
+    /// Total number of timesteps for the simulation
+    max_timesteps: usize,
+    /// How many blocks are mined between timesteps
     block_interval: usize,
 }
 
 impl SimulationBuilder {
-    fn new_random(num_wallets: usize, max_epochs: usize, block_interval: usize) -> Self {
+    fn new_random(num_wallets: usize, max_timesteps: usize, block_interval: usize) -> Self {
         debug_assert!(num_wallets >= 2);
         let seed = rand::thread_rng().gen_range(0..u64::MAX);
         Self {
             seed,
             num_wallets,
-            max_epochs,
+            max_timesteps,
             block_interval,
         }
     }
 
-    fn new(seed: u64, num_wallets: usize, max_epochs: usize, block_interval: usize) -> Self {
+    fn new(seed: u64, num_wallets: usize, max_timesteps: usize, block_interval: usize) -> Self {
         debug_assert!(num_wallets >= 2);
         Self {
             seed,
             num_wallets,
-            max_epochs,
+            max_timesteps,
             block_interval,
         }
     }
@@ -199,9 +198,9 @@ impl SimulationBuilder {
             tx_data: Vec::new(),
             broadcast_set_data: Vec::new(),
             block_data: Vec::new(),
-            current_epoch: Epoch(0),
+            current_timestep: TimeStep(0),
             block_interval: self.block_interval,
-            max_epochs: Epoch(0),
+            max_timestep: TimeStep(0),
             prng_factory,
             spends: OrdMap::new(),
             wallet_info: Vec::new(),
@@ -212,7 +211,7 @@ impl SimulationBuilder {
             cospends: Vec::new(),
             last_processed_message: MessageId(0),
         };
-        sim.max_epochs = Epoch(self.max_epochs);
+        sim.max_timestep = TimeStep(self.max_timesteps);
 
         // genesis block has empty coinbase
         sim.tx_data.push(TxData::default());
@@ -266,8 +265,8 @@ struct Simulation {
     broadcast_set_data: Vec<BroadcastSetData>,
     // TODO mempools, = orderings / replacements of broadcast_sets
     block_data: Vec<BlockData>,
-    current_epoch: Epoch,
-    max_epochs: Epoch,
+    current_timestep: TimeStep,
+    max_timestep: TimeStep,
     block_interval: usize,
     prng_factory: PrngFactory,
     peer_graph: PeerGraph,
@@ -328,7 +327,7 @@ impl<'a> Simulation {
             wallet_id.with_mut(self).wake_up();
         }
 
-        if self.current_epoch.0 % self.block_interval == 0 {
+        if self.current_timestep.0 % self.block_interval == 0 {
             println!("Mining block");
             let bx_id = BroadcastSetId(self.broadcast_set_data.len() - 1);
             let bx_set_handle = bx_id.with_mut(self);
@@ -337,14 +336,14 @@ impl<'a> Simulation {
                 .mine(self.miner_address(), self);
         }
 
-        self.current_epoch = Epoch(self.current_epoch.0 + 1);
+        self.current_timestep = TimeStep(self.current_timestep.0 + 1);
         self.assert_invariants();
     }
 
     fn run(&mut self) {
-        let max_epochs = self.max_epochs;
-        while self.current_epoch < max_epochs {
-            println!("Epoch {}", self.current_epoch.0);
+        let max_timesteps = self.max_timestep;
+        while self.current_timestep < max_timesteps {
+            println!("Timestep {}", self.current_timestep.0);
             self.tick();
             // TODO: call this only in debug / testmode?
             self.assert_invariants();
@@ -372,8 +371,8 @@ impl<'a> Simulation {
     /// Creates a random payment obligation between two wallets.
     fn new_payment_obligation(&mut self) {
         let mut prng = self.prng_factory.generate_prng();
-        if self.max_epochs.0 - self.current_epoch.0 < 2 {
-            // Not enough epochs left to create a payment obligation
+        if self.max_timestep.0 - self.current_timestep.0 < 2 {
+            // Not enough timesteps left to create a payment obligation
             return;
         }
         let max_wallets = self.wallet_data.len() - 1;
@@ -384,7 +383,7 @@ impl<'a> Simulation {
         }
         // TODO: should be a configurable or dependent on the balance of each wallet?
         let amount = prng.gen_range(1..5);
-        let deadline = prng.gen_range(self.current_epoch.0 + 1..self.max_epochs.0);
+        let deadline = prng.gen_range(self.current_timestep.0 + 1..self.max_timestep.0);
         let to_wallet = WalletId(to);
         // First insert payment obligation into simulation
         let payment_obligation_id = PaymentObligationId(self.payment_data.len());
@@ -393,7 +392,7 @@ impl<'a> Simulation {
             amount: Amount::from_int_btc(amount),
             from: WalletId(from),
             to: to_wallet,
-            deadline: Epoch(deadline),
+            deadline: TimeStep(deadline),
         });
 
         // Then insert into to_wallet's expected payments
@@ -524,8 +523,8 @@ impl<'a> Simulation {
 impl std::fmt::Display for Simulation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "=== Simulation State ===")?;
-        writeln!(f, "Current Epoch: {}", self.current_epoch.0)?;
-        writeln!(f, "Max Epochs: {}", self.max_epochs.0)?;
+        writeln!(f, "Current Timestep: {}", self.current_timestep.0)?;
+        writeln!(f, "Max Timesteps: {}", self.max_timestep.0)?;
         writeln!(f, "\nWallets: {}", self.wallet_data.len())?;
 
         for (i, wallet) in self.wallet_data.iter().enumerate() {
@@ -685,7 +684,7 @@ mod tests {
             amount: Amount::from_int_btc(20),
             from: WalletId(0),
             to: bob,
-            deadline: Epoch(2), // TODO 102
+            deadline: TimeStep(2), // TODO 102
         };
         sim.assert_invariants();
 

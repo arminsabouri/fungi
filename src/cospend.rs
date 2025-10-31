@@ -1,6 +1,6 @@
 use crate::{
     transaction::{Input, Output},
-    Epoch,
+    TimeStep,
 };
 
 define_entity!(
@@ -9,7 +9,7 @@ define_entity!(
         pub(crate) id: CospendId,
         pub(crate) inputs: Vec<Input>,
         pub(crate) outputs: Vec<Output>,
-        pub(crate) valid_till: Epoch,
+        pub(crate) valid_till: TimeStep,
         // TODO: acceptable fee rate
         // TODO: other transaction properties (nsequence, nlocktime)
     },

@@ -2,7 +2,7 @@ use crate::{
     blocks::{BroadcastSetHandleMut, BroadcastSetId},
     cospend::{CospendData, CospendId},
     message::{InitiateCospend, MessageData, MessageId, MessageType},
-    Epoch, Simulation,
+    Simulation, TimeStep,
 };
 use bdk_coin_select::{
     metrics::LowestFee, Candidate, ChangePolicy, CoinSelector, Drain, DrainWeights, Target,
@@ -303,10 +303,10 @@ impl<'a> WalletHandleMut<'a> {
         // Other wise I should register my inputs and look for others to collaborate with
 
         if let Some(payment_obligation_id) = self.next_payment_obligation() {
-            let current_epoch = self.sim.current_epoch;
+            let current_timestep = self.sim.current_timestep;
             let payment_obligation = payment_obligation_id.with(self.sim).data().clone();
 
-            let time_left = payment_obligation.deadline.0 as i32 - current_epoch.0 as i32;
+            let time_left = payment_obligation.deadline.0 as i32 - current_timestep.0 as i32;
             // TODO: this should be configurable
             // Right now the wallets are patient for the most part
             if time_left <= 2 {
@@ -398,7 +398,7 @@ define_entity!(
     PaymentObligation,
     {
         pub(crate) id: PaymentObligationId,
-        pub(crate) deadline: Epoch,
+        pub(crate) deadline: TimeStep,
         pub(crate) amount: Amount,
         pub(crate) from: WalletId,
         pub(crate) to: WalletId,
