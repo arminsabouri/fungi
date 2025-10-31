@@ -567,7 +567,7 @@ impl std::fmt::Display for Simulation {
         for (i, payment) in self.payment_data.iter().enumerate() {
             writeln!(
                 f,
-                "\nPayment {}: Amount: {}, From: Wallet {}, To: Address {}, Deadline: Epoch {}",
+                "\nPayment {}: Amount: {}, From: Wallet {}, To: Address {}, Deadline: Timestep {}",
                 i, payment.amount, payment.from.0, payment.to.0, payment.deadline.0
             )?;
         }
