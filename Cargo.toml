@@ -16,3 +16,4 @@ petgraph = "0.8.3"
 rand = "0.8.5"
 rand_chacha = "0.3.1"
 lattice-psbt = { git = "https://github.com/arminsabouri/lattice-psbt", branch = "master" }
+rustworkx-core = "0.17.1"

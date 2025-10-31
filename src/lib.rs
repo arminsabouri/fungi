@@ -10,6 +10,7 @@ use crate::{
         BroadcastSetId, BroadcastSetInfo,
     },
     cospend::{CospendData, CospendId},
+    economic_graph::EconomicGraph,
     message::{MessageData, MessageId},
     transaction::{Outpoint, TxData, TxHandle, TxId, TxInfo},
     wallet::{
@@ -22,6 +23,7 @@ use crate::{
 mod macros;
 mod blocks;
 mod cospend;
+mod economic_graph;
 mod message;
 mod transaction;
 mod wallet;
@@ -189,7 +191,8 @@ impl SimulationBuilder {
     }
 
     fn build(self) -> Simulation {
-        let prng_factory = PrngFactory::new(self.seed);
+        let mut prng_factory = PrngFactory::new(self.seed);
+        let economic_graph_prng = prng_factory.generate_prng();
         let mut sim = Simulation {
             peer_graph: self.create_fully_connected_peer_graph(),
             wallet_data: Vec::new(),
@@ -210,6 +213,7 @@ impl SimulationBuilder {
             messages: Vec::new(),
             cospends: Vec::new(),
             last_processed_message: MessageId(0),
+            economic_graph: EconomicGraph::new(3, economic_graph_prng),
         };
         sim.max_timestep = TimeStep(self.max_timesteps);
 
@@ -247,7 +251,8 @@ impl SimulationBuilder {
         sim.new_wallet();
 
         for _ in 0..self.num_wallets {
-            sim.new_wallet();
+            let wallet_id = sim.new_wallet();
+            sim.economic_graph.grow(wallet_id);
         }
 
         sim
@@ -270,6 +275,7 @@ struct Simulation {
     block_interval: usize,
     prng_factory: PrngFactory,
     peer_graph: PeerGraph,
+    economic_graph: EconomicGraph<ChaChaRng>,
     /// Append only vector of messages
     messages: Vec<MessageData>,
     cospends: Vec<CospendData>,
@@ -371,41 +377,38 @@ impl<'a> Simulation {
     /// Creates a random payment obligation between two wallets.
     fn new_payment_obligation(&mut self) {
         let mut prng = self.prng_factory.generate_prng();
+        let payment_pairs = self.economic_graph.next_ordered_payment_pairs();
         if self.max_timestep.0 - self.current_timestep.0 < 2 {
             // Not enough timesteps left to create a payment obligation
             return;
         }
-        let max_wallets = self.wallet_data.len() - 1;
-        let from = prng.gen_range(0..=max_wallets);
-        let mut to = prng.gen_range(0..=max_wallets);
-        if to == from {
-            to = (to + 1) % max_wallets;
+
+        for (from, to) in payment_pairs {
+            println!("From: {:?}, To: {:?}", from, to);
+            // TODO: should be a configurable or dependent on the balance of each wallet?
+            let deadline = prng.gen_range(self.current_timestep.0 + 1..self.max_timestep.0);
+            // First insert payment obligation into simulation
+            let payment_obligation_id = PaymentObligationId(self.payment_data.len());
+            self.payment_data.push(PaymentObligationData {
+                id: payment_obligation_id,
+                amount: Amount::from_int_btc(prng.gen_range(1..5)),
+                from,
+                to,
+                deadline: TimeStep(deadline),
+            });
+
+            // Then insert into to_wallet's expected payments
+            let last_wallet_info_id = self.wallet_data[to.0].last_wallet_info_id;
+            self.wallet_info[last_wallet_info_id.0]
+                .expected_payments
+                .insert(payment_obligation_id);
+
+            // Then insert into from_wallet's payment obligations
+            let last_wallet_info_id = self.wallet_data[from.0].last_wallet_info_id;
+            self.wallet_info[last_wallet_info_id.0]
+                .payment_obligations
+                .insert(payment_obligation_id);
         }
-        // TODO: should be a configurable or dependent on the balance of each wallet?
-        let amount = prng.gen_range(1..5);
-        let deadline = prng.gen_range(self.current_timestep.0 + 1..self.max_timestep.0);
-        let to_wallet = WalletId(to);
-        // First insert payment obligation into simulation
-        let payment_obligation_id = PaymentObligationId(self.payment_data.len());
-        self.payment_data.push(PaymentObligationData {
-            id: payment_obligation_id,
-            amount: Amount::from_int_btc(amount),
-            from: WalletId(from),
-            to: to_wallet,
-            deadline: TimeStep(deadline),
-        });
-
-        // Then insert into to_wallet's expected payments
-        let last_wallet_info_id = self.wallet_data[to].last_wallet_info_id;
-        self.wallet_info[last_wallet_info_id.0]
-            .expected_payments
-            .insert(payment_obligation_id);
-
-        // Then insert into from_wallet's payment obligations
-        let last_wallet_info_id = self.wallet_data[from].last_wallet_info_id;
-        self.wallet_info[last_wallet_info_id.0]
-            .payment_obligations
-            .insert(payment_obligation_id);
     }
 
     fn new_wallet(&mut self) -> WalletId {
