@@ -8,7 +8,6 @@ use im::OrdSet;
 
 use crate::{
     transaction::{TxHandle, TxId},
-    wallet::WalletId,
     Simulation,
 };
 
