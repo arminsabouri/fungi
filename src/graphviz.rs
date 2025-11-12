@@ -97,7 +97,6 @@ impl Simulation {
                 let wallet_id = input.prevout().wallet().id;
                 let color =
                     format!("\"#{:x}\"", PAIRED[wallet_id.0 % PAIRED.len()]).to_ascii_uppercase();
-                println!("color {}", color);
                 graph.add_stmt(stmt!(node!(input_id; attr!("fillcolor", color))));
             });
             tx.outputs().for_each(|output| {
@@ -106,7 +105,6 @@ impl Simulation {
                 let color =
                     format!("\"#{:x}\"", PAIRED[wallet_id.0 % PAIRED.len()]).to_ascii_uppercase();
 
-                println!("color {}", color);
                 graph.add_stmt(stmt!(node!(output_id; attr!("fillcolor", color))));
             });
         }
