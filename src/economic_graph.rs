@@ -5,7 +5,7 @@ use rustworkx_core::generators::barabasi_albert_graph;
 use crate::wallet::WalletId;
 
 // dictates how PaymentObligations are generated
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct EconomicGraph<R>
 where
     R: Rng + Sized,

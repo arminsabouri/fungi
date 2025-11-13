@@ -1,6 +1,10 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use bitcoin::{Amount, Weight};
+use graphviz_rust::{cmd::Format, dot_structures, printer::PrinterContext};
 use im::{OrdMap, OrdSet, Vector};
 use petgraph::graph::{NodeIndex, UnGraph};
 use rand::{Rng, SeedableRng};
@@ -31,7 +35,7 @@ mod message;
 mod transaction;
 mod wallet;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PrngFactory(ChaChaRng);
 
 impl PrngFactory {
@@ -135,7 +139,7 @@ enum CoinSelectionStrategy {
 // #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 // struct TxByFeerate(FeeRate, TxId);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 // TODO: use WalletId instead of usize?
 struct PeerGraph(UnGraph<usize, ()>);
 
@@ -280,7 +284,7 @@ impl SimulationBuilder {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SimulationConfig {
     num_wallets: usize,
     max_timestep: TimeStep,
@@ -289,7 +293,7 @@ struct SimulationConfig {
 }
 
 /// all entities are numbered sequentially
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Simulation {
     // primary information
     wallet_data: Vec<WalletData>,
@@ -349,7 +353,7 @@ impl<'a> Simulation {
         self.assert_invariants();
     }
 
-    pub fn run(&mut self) {
+    pub fn run(&mut self) -> SimulationResult {
         let max_timesteps = self.config.max_timestep;
         while self.current_timestep < max_timesteps {
             println!("Timestep {}", self.current_timestep.0);
@@ -357,6 +361,7 @@ impl<'a> Simulation {
             // TODO: call this only in debug / testmode?
             self.assert_invariants();
         }
+        SimulationResult::new(self.clone())
     }
 
     fn tick(&mut self) {
@@ -642,10 +647,58 @@ impl std::fmt::Display for Simulation {
     }
 }
 
+// left of here: This should be a static container for sim results, and impl serialize / deserialize so we can save the results to ondisk
+// Util methods dont seem too useful here.
+pub struct SimulationResult {
+    tx_graph: dot_structures::Graph,
+    missed_payment_obligations: Vec<(WalletId, usize)>,
+    total_payment_obligations: usize,
+}
+
+impl SimulationResult {
+    pub fn new(sim: Simulation) -> Self {
+        let mut missed_payment_obligations = Vec::new();
+        for wallet in sim.get_wallet_handles() {
+            let handled_payment_obligations = wallet.info().handled_payment_obligations.clone();
+            let payment_obligations = wallet.info().payment_obligations.clone();
+            let diff = handled_payment_obligations.difference(payment_obligations);
+            missed_payment_obligations.push((wallet.data().id, diff.len()));
+        }
+        Self {
+            tx_graph: sim.draw_tx_graph(),
+            missed_payment_obligations,
+            total_payment_obligations: sim.payment_data.len(),
+        }
+    }
+
+    pub fn total_payment_obligations(&self) -> usize {
+        self.total_payment_obligations
+    }
+
+    pub fn precentage_of_payment_obligations_missed(&self) -> f64 {
+        let total_payment_obligations = self.total_payment_obligations();
+        self.missed_payment_obligations
+            .iter()
+            .map(|(_, count)| count)
+            .sum::<usize>() as f64
+            / total_payment_obligations as f64
+    }
+
+    pub fn save_tx_graph(&self, path: impl AsRef<Path>) {
+        let graph_svg = graphviz_rust::exec(
+            self.tx_graph.clone(),
+            &mut PrinterContext::default(),
+            vec![Format::Svg.into()],
+        )
+        .unwrap();
+        std::fs::write(path, graph_svg).unwrap();
+    }
+    // TODO: utxo fragmentation, block space consumption, anon set metrics
+}
+
 #[cfg(test)]
 mod tests {
     use bdk_coin_select::{Target, TargetFee, TargetOutputs};
-    use graphviz_rust::{cmd::Format, exec, printer::PrinterContext};
     use im::{ordset, vector};
 
     use crate::transaction::{Input, Output};
@@ -657,48 +710,30 @@ mod tests {
         let mut sim = SimulationBuilder::new(42, 5, 20, 1, 10).build();
         sim.assert_invariants();
         sim.build_universe();
-        sim.run();
+        let result = sim.run();
         sim.assert_invariants();
 
         println!("{}", sim);
-
-        let graph = sim.draw_tx_graph(sim.tx_data.iter().enumerate().map(|(i, _)| TxId(i)));
-
-        let graph_svg = exec(
-            graph,
-            &mut PrinterContext::default(),
-            vec![Format::Svg.into()],
-        )
-        .unwrap();
-
-        std::fs::write("graph.svg", graph_svg).unwrap();
-
+        result.save_tx_graph("graph.svg");
         // Lets check the simulation state after the run
         // Specifically how many payment obligations we're missed
         // And how many were created in a cospend
-        let total_payment_obligations = sim.payment_data.len();
-        println!("Total payment obligations: {}", total_payment_obligations);
-        let mut missed_payment_obligation = std::collections::HashMap::<WalletId, usize>::new();
-        sim.get_wallet_handles().for_each(|w| {
-            let handled_payment_obligations = w.info().handled_payment_obligations.clone();
-            let payment_obligations = w.info().payment_obligations.clone();
-            let union = handled_payment_obligations.difference(payment_obligations);
-            missed_payment_obligation.insert(w.data().id, union.len());
-        });
+        println!(
+            "Total payment obligations: {}",
+            result.total_payment_obligations()
+        );
         println!(
             "Missed payment obligations: {:?}",
-            missed_payment_obligation
+            result.missed_payment_obligations
         );
         println!(
             "Missed payment obligations percentage: {:?}",
-            missed_payment_obligation.values().sum::<usize>() as f64
-                / total_payment_obligations as f64
+            result.precentage_of_payment_obligations_missed()
         );
     }
 
     #[test]
     fn it_works() {
-        
         let mut sim = SimulationBuilder::new(42, 2, 20, 1, 10).build();
         sim.assert_invariants();
 

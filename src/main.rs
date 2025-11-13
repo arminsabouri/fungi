@@ -27,5 +27,14 @@ fn main() {
     .build();
 
     sim.build_universe();
-    sim.run();
+    let result = sim.run();
+    result.save_tx_graph("graph.svg");
+    println!(
+        "Total payment obligations: {}",
+        result.total_payment_obligations()
+    );
+    println!(
+        "Missed payment obligations percentage: {:?}",
+        result.precentage_of_payment_obligations_missed()
+    );
 }

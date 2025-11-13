@@ -7,7 +7,7 @@ use graphviz_rust::{
 };
 use im::OrdSet;
 
-use crate::{transaction::TxHandle, Simulation};
+use crate::{transaction::TxHandle, Simulation, SimulationResult};
 
 // TODO make overridable? builder pattern?
 pub fn new(name: &str) -> Graph {
@@ -47,9 +47,14 @@ pub fn new(name: &str) -> Graph {
 }
 
 impl Simulation {
-    pub fn draw_tx_graph(&self, txs: impl IntoIterator<Item = crate::transaction::TxId>) -> Graph {
+    pub fn draw_tx_graph(&self) -> Graph {
         let mut graph = new("tx_graph");
 
+        let txs = self
+            .tx_data
+            .iter()
+            .enumerate()
+            .map(|(i, _)| crate::transaction::TxId(i));
         let mut txs: OrdSet<crate::transaction::TxId> = txs.into_iter().collect();
         if txs.is_empty() {
             // TODO default to broadcast txs, not all created txs?
