@@ -13,7 +13,7 @@ use bdk_coin_select::{
 use bitcoin::{transaction::InputWeightPrediction, Amount};
 use im::{OrdSet, Vector};
 
-const PAYMENT_OBLIGATION_DEADLINE_THRESHOLD: i32 = 2;
+const PAYMENT_OBLIGATION_DEADLINE_THRESHOLD: f64 = 2.0;
 
 use crate::transaction::*;
 
@@ -252,6 +252,13 @@ impl<'a> WalletHandleMut<'a> {
         tx
     }
 
+    /// Model payment obligation deadline anxiety as a cubic function of the time left.
+    /// The goal is to make the wallets more anxious as the deadline approaches and expires.
+    fn deadline_anxiety(&self, deadline: i32) -> f64 {
+        let time_left = deadline - self.sim.current_timestep.0 as i32;
+        (time_left.pow(3) as f64) / 50.0
+    }
+
     /// Returns the next payment obligation that is not handled
     /// TODO: this should be a priority queue
     fn next_payment_obligation(&'a self) -> Option<PaymentObligationId> {
@@ -261,14 +268,15 @@ impl<'a> WalletHandleMut<'a> {
             .difference(self.info().handled_payment_obligations.clone())
             .iter()
             .filter(|payment_obligation_id| {
-                let time_left = payment_obligation_id.with(self.sim).data().deadline.0 as i32
-                    - self.sim.current_timestep.0 as i32;
+                let anxiety_factor = self.deadline_anxiety(
+                    payment_obligation_id.with(self.sim).data().deadline.0 as i32,
+                );
                 // If already in a cospend or not due soon
                 !self
                     .info()
                     .payment_obligation_to_cospend
                     .contains_key(payment_obligation_id)
-                    || time_left <= PAYMENT_OBLIGATION_DEADLINE_THRESHOLD
+                    || anxiety_factor <= PAYMENT_OBLIGATION_DEADLINE_THRESHOLD
             })
             .next()
             .cloned()
@@ -354,13 +362,13 @@ impl<'a> WalletHandleMut<'a> {
         // Other wise I should register my inputs and look for others to collaborate with
 
         if let Some(payment_obligation_id) = self.next_payment_obligation() {
-            let current_timestep = self.sim.current_timestep;
             let payment_obligation = payment_obligation_id.with(self.sim).data().clone();
 
-            let time_left = payment_obligation.deadline.0 as i32 - current_timestep.0 as i32;
             // TODO: this should be configurable
             // Right now the wallets are patient for the most part
-            if time_left <= PAYMENT_OBLIGATION_DEADLINE_THRESHOLD {
+            if self.deadline_anxiety(payment_obligation.deadline.0 as i32)
+                <= PAYMENT_OBLIGATION_DEADLINE_THRESHOLD
+            {
                 self.handle_payment_obligations(&payment_obligation);
                 // TODO: if we are handling a payment obligation, we should not register inputs. This doesn't have to be the case but doing this for now bc its easier to debug
                 return;

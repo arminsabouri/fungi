@@ -1,4 +1,3 @@
-use crate::cospend::CospendId;
 use crate::wallet::{AddressHandle, AddressId, WalletHandle, WalletHandleMut};
 use crate::Simulation;
 use bitcoin::consensus::Decodable;
@@ -84,7 +83,10 @@ pub(crate) struct InputId {
 
 impl From<InputId> for Outpoint {
     fn from(id: InputId) -> Self {
-        Outpoint { txid: id.txid, index: id.index }
+        Outpoint {
+            txid: id.txid,
+            index: id.index,
+        }
     }
 }
 
