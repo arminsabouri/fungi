@@ -1,0 +1,14 @@
+[simulation]
+seed = 42
+max_timestep = 10
+num_payment_obligations = 15
+
+[[wallet_types]]
+name = "Payjoiner"
+count = 3
+strategies = ["UnilateralSpender", "PayjoinStrategy"]
+[wallet_types.scorer]
+initiate_payjoin_utility_factor = 2.0
+respond_to_payjoin_utility_factor = 5.0
+payment_obligation_utility_factor = 1.0
+

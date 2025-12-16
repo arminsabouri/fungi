@@ -266,8 +266,9 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
 
 /// Strategies will pick one action to minimize their cost
 /// TODO: Strategies should be composible. They should enform the action decision space scoring and doing actions should be handling by something else that has composed multiple strategies.
-pub(crate) trait Strategy {
+pub(crate) trait Strategy: std::fmt::Debug {
     fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action>;
+    fn clone_box(&self) -> Box<dyn Strategy>;
 }
 
 #[derive(Debug, PartialEq, PartialOrd)]
@@ -295,6 +296,7 @@ impl Add for ActionScore {
     }
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct UnilateralSpender;
 
 impl Strategy for UnilateralSpender {
@@ -311,8 +313,13 @@ impl Strategy for UnilateralSpender {
 
         actions
     }
+
+    fn clone_box(&self) -> Box<dyn Strategy> {
+        Box::new(self.clone())
+    }
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct BatchSpender;
 
 impl Strategy for BatchSpender {
@@ -328,8 +335,13 @@ impl Strategy for BatchSpender {
         }
         vec![Action::BatchSpend(payment_obligation_ids)]
     }
+
+    fn clone_box(&self) -> Box<dyn Strategy> {
+        Box::new(self.clone())
+    }
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct PayjoinStrategy;
 
 impl Strategy for PayjoinStrategy {
@@ -361,8 +373,13 @@ impl Strategy for PayjoinStrategy {
 
         actions
     }
+
+    fn clone_box(&self) -> Box<dyn Strategy> {
+        Box::new(self.clone())
+    }
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct CompositeStrategy {
     pub(crate) strategies: Vec<Box<dyn Strategy>>,
 }
@@ -375,8 +392,20 @@ impl Strategy for CompositeStrategy {
         }
         actions
     }
+
+    fn clone_box(&self) -> Box<dyn Strategy> {
+        Box::new(self.clone())
+    }
 }
+
+impl Clone for Box<dyn Strategy> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
 // TODO: this should be a trait once we have different scoring strategies
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CompositeScorer {
     pub(crate) initiate_payjoin_utility_factor: f64,
     pub(crate) respond_to_payjoin_utility_factor: f64,
@@ -410,5 +439,15 @@ impl CompositeScorer {
             }
         }
         score
+    }
+}
+
+/// Creates a strategy instance from its name string
+pub(crate) fn create_strategy(name: &str) -> Result<Box<dyn Strategy>, String> {
+    match name {
+        "UnilateralSpender" => Ok(Box::new(UnilateralSpender)),
+        "BatchSpender" => Ok(Box::new(BatchSpender)),
+        "PayjoinStrategy" => Ok(Box::new(PayjoinStrategy)),
+        _ => Err(format!("Unknown strategy: {}", name)),
     }
 }

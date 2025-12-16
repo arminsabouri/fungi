@@ -1,8 +1,5 @@
 use crate::{
-    actions::{
-        Action, BatchSpender, CompositeScorer, CompositeStrategy, PayjoinStrategy, Strategy,
-        UnilateralSpender, WalletView,
-    },
+    actions::{Action, CompositeScorer, CompositeStrategy, Strategy, WalletView},
     blocks::{BroadcastSetHandleMut, BroadcastSetId},
     message::{MessageData, MessageId, MessageType, PayjoinProposal},
     Simulation, TimeStep,
@@ -17,17 +14,20 @@ use log::{info, warn};
 
 use crate::transaction::*;
 
-define_entity_mut_updatable!(
-    Wallet,
-    {
-        pub(crate) id: WalletId,
-        pub(crate) addresses: Vec<AddressId>,         // TODO split into internal/external?
-        pub(crate) own_transactions: Vec<TxId>,       // transactions originating from this wallet
-        pub(crate) last_wallet_info_id: WalletInfoId, // Monotone
-        // Monotone index of the last message that was processed by this wallet
-        pub(crate) messages_processed: OrdSet<MessageId>,
-    },
-    {
+define_entity_id_and_handle!(Wallet);
+define_entity_handle_mut!(Wallet);
+define_entity_info_id!(Wallet);
+define_entity_data!(Wallet, {
+    pub(crate) id: WalletId,
+    pub(crate) addresses: Vec<AddressId>,         // TODO split into internal/external?
+    pub(crate) own_transactions: Vec<TxId>,       // transactions originating from this wallet
+    pub(crate) last_wallet_info_id: WalletInfoId, // Monotone
+    // Monotone index of the last message that was processed by this wallet
+    pub(crate) messages_processed: OrdSet<MessageId>,
+    pub(crate) strategies: CompositeStrategy,
+    pub(crate) scorer: CompositeScorer,
+}, skip_eq_clone);
+define_entity_info!(Wallet, {
         pub(crate) broadcast_set_id: BroadcastSetId,
         pub(crate) payment_obligations: OrdSet<PaymentObligationId>,
         pub(crate) expected_payments: OrdSet<PaymentObligationId>,
@@ -370,20 +370,14 @@ impl<'a> WalletHandleMut<'a> {
     }
 
     pub(crate) fn wake_up(&'a mut self) {
-        let scorer = CompositeScorer {
-            initiate_payjoin_utility_factor: 2.0,
-            payment_obligation_utility_factor: 1.0,
-            respond_to_payjoin_utility_factor: 5.0,
-        };
-        let strategy = CompositeStrategy {
-            strategies: vec![
-                Box::new(UnilateralSpender),
-                Box::new(BatchSpender),
-                Box::new(PayjoinStrategy),
-            ],
-        };
-        let action = strategy
-            .enumerate_candidate_actions(&self.wallet_view())
+        let scorer = &self.data().scorer;
+        let wallet_view = self.wallet_view();
+        let mut all_actions = Vec::new();
+        for strategy in self.data().strategies.strategies.iter() {
+            all_actions.extend(strategy.enumerate_candidate_actions(&wallet_view));
+        }
+
+        let action = all_actions
             .into_iter()
             .max_by_key(|action| scorer.score_action(action, self))
             .unwrap_or(Action::Wait);

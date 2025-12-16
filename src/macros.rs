@@ -49,6 +49,17 @@ macro_rules! define_entity_data {
             pub(crate) struct [<$base Data>] $data_fields
         }
     };
+    (
+        $base:ident,
+        $data_fields:tt,
+        skip_eq_clone
+    ) => {
+        paste::paste! {
+            /// Primary information associated with $base.
+            #[derive(Debug, Clone)]
+            pub(crate) struct [<$base Data>] $data_fields
+        }
+    };
 }
 
 macro_rules! define_entity_info {

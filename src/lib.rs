@@ -12,10 +12,12 @@ use rand_pcg::rand_core::{RngCore, SeedableRng};
 use rand_pcg::Pcg64;
 
 use crate::{
+    actions::{create_strategy, CompositeScorer, CompositeStrategy},
     blocks::{
         BlockData, BlockHandle, BlockId, BlockInfo, BroadcastSetData, BroadcastSetHandleMut,
         BroadcastSetId, BroadcastSetInfo,
     },
+    config::WalletTypeConfig,
     economic_graph::EconomicGraph,
     message::{MessageData, MessageId},
     transaction::{InputId, Outpoint, TxData, TxHandle, TxId, TxInfo},
@@ -29,6 +31,7 @@ use crate::{
 mod macros;
 mod actions;
 mod blocks;
+pub mod config;
 mod economic_graph;
 mod graphviz;
 mod message;
@@ -150,8 +153,8 @@ pub(crate) struct TimeStep(u64);
 #[derive(Debug)]
 pub struct SimulationBuilder {
     seed: u64,
-    /// Number of wallets/agents in the simulation
-    num_wallets: usize,
+    /// Wallet type configurations
+    wallet_types: Vec<WalletTypeConfig>,
     /// Total number of timesteps for the simulation
     max_timestep: TimeStep,
     /// How many blocks are mined between timesteps
@@ -161,42 +164,30 @@ pub struct SimulationBuilder {
 }
 
 impl SimulationBuilder {
-    pub fn new_random(
-        num_wallets: usize,
+    pub fn new(
+        seed: u64,
+        wallet_types: Vec<WalletTypeConfig>,
         max_timestep: u64,
         block_interval: u64,
         num_payment_obligations: usize,
     ) -> Self {
-        debug_assert!(num_wallets >= 2);
-        let seed = rand::thread_rng().gen_range(0..u64::MAX);
+        let total_wallets: usize = wallet_types.iter().map(|wt| wt.count).sum();
+        debug_assert!(total_wallets >= 2, "Must have at least 2 wallets total");
         Self {
             seed,
-            num_wallets,
+            wallet_types,
             max_timestep: TimeStep(max_timestep),
             block_interval,
             num_payment_obligations,
         }
     }
 
-    pub fn new(
-        seed: u64,
-        num_wallets: usize,
-        max_timestep: u64,
-        block_interval: u64,
-        num_payment_obligations: usize,
-    ) -> Self {
-        debug_assert!(num_wallets >= 2);
-        Self {
-            seed,
-            num_wallets,
-            max_timestep: TimeStep(max_timestep),
-            block_interval,
-            num_payment_obligations,
-        }
+    fn total_wallets(&self) -> usize {
+        self.wallet_types.iter().map(|wt| wt.count).sum()
     }
 
     fn create_fully_connected_peer_graph(&self) -> PeerGraph {
-        let num_wallets = self.num_wallets;
+        let num_wallets = self.total_wallets();
         let mut nodes: Vec<(usize, usize)> = Vec::new();
         for i in 0..num_wallets {
             for j in 0..num_wallets {
@@ -233,7 +224,7 @@ impl SimulationBuilder {
             messages: Vec::new(),
             economic_graph: EconomicGraph::new(3, economic_graph_prng),
             config: SimulationConfig {
-                num_wallets: self.num_wallets,
+                num_wallets: self.total_wallets(),
                 max_timestep: self.max_timestep,
                 block_interval: self.block_interval,
                 num_payment_obligations: self.num_payment_obligations,
@@ -270,9 +261,32 @@ impl SimulationBuilder {
             invalidated_txs: OrdSet::default(),
         });
 
-        for _ in 0..self.num_wallets {
-            let wallet_id = sim.new_wallet();
-            sim.economic_graph.grow(wallet_id);
+        // Create wallets according to their type configurations
+        for wallet_type in &self.wallet_types {
+            let scorer = CompositeScorer {
+                initiate_payjoin_utility_factor: wallet_type.scorer.initiate_payjoin_utility_factor,
+                payment_obligation_utility_factor: wallet_type
+                    .scorer
+                    .payment_obligation_utility_factor,
+                respond_to_payjoin_utility_factor: wallet_type
+                    .scorer
+                    .respond_to_payjoin_utility_factor,
+            };
+
+            for _ in 0..wallet_type.count {
+                // Create new strategy instances for each wallet (can't clone Box<dyn Strategy>)
+                let mut strategies = Vec::new();
+                for strategy_name in &wallet_type.strategies {
+                    match create_strategy(strategy_name) {
+                        Ok(s) => strategies.push(s),
+                        Err(e) => {
+                            panic!("Failed to create strategy {}: {}", strategy_name, e);
+                        }
+                    }
+                }
+                let wallet_id = sim.new_wallet(CompositeStrategy { strategies }, scorer.clone());
+                sim.economic_graph.grow(wallet_id);
+            }
         }
 
         sim
@@ -318,10 +332,10 @@ pub struct Simulation {
 impl<'a> Simulation {
     pub fn build_universe(&mut self) {
         let mut prng = self.prng_factory.generate_prng();
-        let wallets = self.wallet_data.clone();
-        let addresses = wallets
+        let wallet_ids: Vec<WalletId> = self.wallet_data.iter().map(|w| w.id).collect();
+        let addresses = wallet_ids
             .iter()
-            .map(|w| w.id.with_mut(self).new_address())
+            .map(|&id| id.with_mut(self).new_address())
             .collect::<Vec<_>>();
 
         // For now we just mine a coinbase transaction for each wallet
@@ -354,7 +368,7 @@ impl<'a> Simulation {
             // TODO: call this only in debug / testmode?
             self.assert_invariants();
         }
-        SimulationResult::new(self.clone())
+        SimulationResult::new(self)
     }
 
     fn tick(&mut self) {
@@ -444,7 +458,7 @@ impl<'a> Simulation {
         }
     }
 
-    fn new_wallet(&mut self) -> WalletId {
+    fn new_wallet(&mut self, strategies: CompositeStrategy, scorer: CompositeScorer) -> WalletId {
         // TODO wallet_handle?
         let last_wallet_info_id = WalletInfoId(self.wallet_info.len());
         self.wallet_info.push(WalletInfo {
@@ -472,6 +486,8 @@ impl<'a> Simulation {
             addresses: Vec::default(),
             own_transactions: Vec::default(),
             messages_processed: OrdSet::<MessageId>::default(),
+            strategies,
+            scorer,
         });
         id
     }
@@ -655,7 +671,7 @@ pub struct SimulationResult {
 }
 
 impl SimulationResult {
-    pub fn new(sim: Simulation) -> Self {
+    pub fn new(sim: &Simulation) -> Self {
         let mut missed_payment_obligations = Vec::new();
         for wallet in sim.get_wallet_handles() {
             let handled_payment_obligations = wallet.info().handled_payment_obligations.clone();
@@ -706,7 +722,22 @@ mod tests {
 
     #[test]
     fn test_universe() {
-        let mut sim = SimulationBuilder::new(42, 5, 20, 1, 10).build();
+        use crate::config::{ScorerConfig, WalletTypeConfig};
+        let wallet_types = vec![WalletTypeConfig {
+            name: "default".to_string(),
+            count: 5,
+            strategies: vec![
+                "UnilateralSpender".to_string(),
+                "BatchSpender".to_string(),
+                "PayjoinStrategy".to_string(),
+            ],
+            scorer: ScorerConfig {
+                initiate_payjoin_utility_factor: 2.0,
+                respond_to_payjoin_utility_factor: 5.0,
+                payment_obligation_utility_factor: 1.0,
+            },
+        }];
+        let mut sim = SimulationBuilder::new(42, wallet_types, 20, 1, 10).build();
         sim.assert_invariants();
         sim.build_universe();
         let result = sim.run();
@@ -733,12 +764,53 @@ mod tests {
 
     #[test]
     fn it_works() {
-        let mut sim = SimulationBuilder::new(42, 2, 20, 1, 10).build();
+        use crate::config::{ScorerConfig, WalletTypeConfig};
+        let wallet_types = vec![WalletTypeConfig {
+            name: "default".to_string(),
+            count: 2,
+            strategies: vec![
+                "UnilateralSpender".to_string(),
+                "BatchSpender".to_string(),
+                "PayjoinStrategy".to_string(),
+            ],
+            scorer: ScorerConfig {
+                initiate_payjoin_utility_factor: 2.0,
+                respond_to_payjoin_utility_factor: 5.0,
+                payment_obligation_utility_factor: 1.0,
+            },
+        }];
+        let mut sim = SimulationBuilder::new(42, wallet_types, 20, 1, 10).build();
         sim.assert_invariants();
 
-        let alice = sim.new_wallet();
+        use crate::actions::{create_strategy, CompositeScorer};
+        let default_scorer = CompositeScorer {
+            initiate_payjoin_utility_factor: 2.0,
+            payment_obligation_utility_factor: 1.0,
+            respond_to_payjoin_utility_factor: 5.0,
+        };
+        let alice_strategies = vec![
+            create_strategy("UnilateralSpender").unwrap(),
+            create_strategy("BatchSpender").unwrap(),
+            create_strategy("PayjoinStrategy").unwrap(),
+        ];
+        let bob_strategies = vec![
+            create_strategy("UnilateralSpender").unwrap(),
+            create_strategy("BatchSpender").unwrap(),
+            create_strategy("PayjoinStrategy").unwrap(),
+        ];
+        let alice = sim.new_wallet(
+            CompositeStrategy {
+                strategies: alice_strategies,
+            },
+            default_scorer.clone(),
+        );
         sim.assert_invariants();
-        let bob = sim.new_wallet();
+        let bob = sim.new_wallet(
+            CompositeStrategy {
+                strategies: bob_strategies,
+            },
+            default_scorer,
+        );
         sim.assert_invariants();
 
         let alice_coinbase_addr = alice.with_mut(&mut sim).new_address();

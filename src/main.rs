@@ -1,30 +1,21 @@
-use clap::Parser;
-
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    #[arg(short, long)]
-    num_wallets: usize,
-    #[arg(short, long)]
-    payment_obligations: usize,
-    #[arg(short, long)]
-    time_steps: u64,
-    #[arg(short, long)]
-    block_interval: u64,
-    #[arg(short, long)]
-    seed: Option<u64>,
-}
+use std::env;
 
 fn main() {
     env_logger::init();
 
-    let args = Args::parse();
+    // Read config file path from environment or use default
+    let config_path = env::var("CONFIG_FILE").unwrap_or_else(|_| "config.toml".to_string());
+
+    let config = btsim::config::Config::from_file(&config_path)
+        .expect(&format!("Failed to parse config file: {}", config_path));
+
+    let seed = config.simulation.seed.unwrap_or(42);
     let mut sim = btsim::SimulationBuilder::new(
-        args.seed.unwrap_or(42),
-        args.num_wallets,
-        args.time_steps,
-        args.block_interval,
-        args.payment_obligations,
+        seed,
+        config.wallet_types,
+        config.simulation.max_timestep,
+        1, // TODO: hardcoded block interval for now. If we change this we need to ensure payment obligations are not being double handled.
+        config.simulation.num_payment_obligations,
     )
     .build();
 
