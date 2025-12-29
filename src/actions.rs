@@ -1,4 +1,4 @@
-use std::{iter::Sum, ops::Add};
+use std::{collections::HashSet, iter::Sum, ops::Add};
 
 use bitcoin::Amount;
 use log::debug;
@@ -448,6 +448,14 @@ impl Strategy for MultipartyPayjoinInitiatorStrategy {
         // TODO: if the sesion is on going do not intiate a new one
         // TODO: this is scaffolding for now, peers in the future will evaluate if they should initiate a multi-party payjoin given the number of payment obligations
         if state.wallet_id != WalletId(0) {
+            return vec![Action::Wait];
+        }
+        let receivers = state
+            .payment_obligations
+            .iter()
+            .map(|po| po.to)
+            .collect::<HashSet<_>>();
+        if receivers.len() < 2 {
             return vec![Action::Wait];
         }
 
