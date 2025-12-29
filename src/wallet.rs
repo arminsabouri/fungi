@@ -341,12 +341,7 @@ impl<'a> WalletHandleMut<'a> {
         }
         let change_addr = self.new_address();
         let tx_template = self.construct_transaction_template(po_ids, &change_addr);
-        let session = SentBulletinBoardId::new(
-            self.sim,
-            bulletin_board_id,
-            tx_template.clone(),
-            po_ids.len() as u16,
-        );
+        let session = SentBulletinBoardId::new(self.sim, bulletin_board_id, tx_template.clone());
 
         session.send_inputs();
         info!("Sent inputs for multi party payjoin session");
@@ -374,15 +369,12 @@ impl<'a> WalletHandleMut<'a> {
             self.id,
             state
         );
-        let n = 2;
-
         match state {
             TxConstructionState::SentBulletinBoardId => {
                 let t = SentBulletinBoardId::new(
                     self.sim,
                     *bulletin_board_id,
                     session.tx_template.clone(),
-                    n,
                 );
                 t.send_inputs();
                 let mut updated_session = session.clone();
@@ -397,8 +389,7 @@ impl<'a> WalletHandleMut<'a> {
                 return;
             }
             TxConstructionState::SentInputs => {
-                let t =
-                    SentInputs::new(self.sim, *bulletin_board_id, session.tx_template.clone(), n);
+                let t = SentInputs::new(self.sim, *bulletin_board_id, session.tx_template.clone());
                 let res = t.have_enough_inputs();
                 if let Some(_) = res {
                     let mut updated_session = session.clone();
@@ -414,8 +405,7 @@ impl<'a> WalletHandleMut<'a> {
                 return;
             }
             TxConstructionState::SentOutputs => {
-                let t =
-                    SentOutputs::new(self.sim, *bulletin_board_id, session.tx_template.clone(), n);
+                let t = SentOutputs::new(self.sim, *bulletin_board_id, session.tx_template.clone());
                 let res = t.have_enough_outputs();
                 if let Some(_) = res {
                     let mut updated_session = session.clone();
@@ -431,12 +421,7 @@ impl<'a> WalletHandleMut<'a> {
                 return;
             }
             TxConstructionState::SentReadyToSign => {
-                let t = SentReadyToSign::new(
-                    self.sim,
-                    *bulletin_board_id,
-                    session.tx_template.clone(),
-                    n,
-                );
+                let t = SentReadyToSign::new(self.sim, *bulletin_board_id);
                 let res = t.have_enough_ready_to_sign();
                 if let Some(tx) = res {
                     // TODO: only the leader should broadcast the tx right now
