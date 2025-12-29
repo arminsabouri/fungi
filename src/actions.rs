@@ -6,7 +6,7 @@ use log::debug;
 use crate::{
     bulletin_board::BulletinBoardId,
     message::{MessageId, PayjoinProposal},
-    wallet::{PaymentObligationData, PaymentObligationId, WalletHandleMut},
+    wallet::{PaymentObligationData, PaymentObligationId, WalletHandleMut, WalletId},
     Simulation, TimeStep,
 };
 
@@ -53,6 +53,11 @@ pub(crate) enum Action {
         BulletinBoardId,
         MessageId,
     ),
+    InitiateMultiPartyPayjoin(Vec<PaymentObligationId>),
+    /// Participate in Multiparty payjoin
+    ParticipateMultiPartyPayjoin((MessageId, BulletinBoardId, PaymentObligationId)),
+    /// Continue to participate in a multi-party payjoin
+    ContinueParticipateMultiPartyPayjoin(BulletinBoardId),
     /// Do nothing. There may be better oppurtunities to spend a payment obligation or participate in a payjoin.
     Wait,
 }
@@ -63,6 +68,8 @@ pub(crate) enum PredictedOutcome {
     PaymentObligationsHandled(Vec<PaymentObligationHandledOutcome>),
     InitiatePayjoin(InitiatePayjoinOutcome),
     RespondToPayjoin(RespondToPayjoinOutcome),
+    InitiateMultiPartyPayjoin(InitiateMultiPartyPayjoinOutcome),
+    ParticipateMultiPartyPayjoin(ParticipateMultiPartyPayjoinOutcome),
 }
 
 #[derive(Debug)]
@@ -145,12 +152,53 @@ impl RespondToPayjoinOutcome {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct InitiateMultiPartyPayjoinOutcome {
+    /// Time left on the payment obligation
+    time_left: i32,
+    /// Amount of the payment obligation
+    amount_handled: f64,
+    /// Balance difference after the action
+    balance_difference: f64,
+    /// Upper bound on the number of participants in the multi-party payjoin
+    max_participants: u32,
+}
+
+impl InitiateMultiPartyPayjoinOutcome {
+    fn score(&self, multi_party_payjoin_utility_factor: f64) -> ActionScore {
+        // For now the score for initiating a multi-party payjoin is really high so it always happens no matter what
+        let score = self.amount_handled * 100.0;
+        debug!("InitiateMultiPartyPayjoinEvent score: {:?}", score);
+        ActionScore(score)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ParticipateMultiPartyPayjoinOutcome {
+    /// Time left on the payment obligation
+    time_left: i32,
+    /// Amount of the payment obligation
+    amount_handled: f64,
+}
+
+impl ParticipateMultiPartyPayjoinOutcome {
+    fn score(&self, multi_party_payjoin_utility_factor: f64) -> ActionScore {
+        // TODO: score the participation as a linear function of the progression of the session
+        let score = self.amount_handled * 100.0;
+        debug!("ParticipateMultiPartyPayjoinEvent score: {:?}", score);
+        ActionScore(score)
+    }
+}
+
 /// State of the wallet that can be used to potential enumerate actions
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct WalletView {
     payment_obligations: Vec<PaymentObligationData>,
     payjoin_proposals: Vec<(MessageId, BulletinBoardId, PayjoinProposal)>,
+    active_multi_party_payjoins: Vec<BulletinBoardId>,
+    new_multi_party_payjoins: Vec<(BulletinBoardId, MessageId)>,
     current_timestep: TimeStep,
+    wallet_id: WalletId,
     // TODO: utxos, feerate, cospend oppurtunities, etc.
 }
 
@@ -158,12 +206,18 @@ impl WalletView {
     pub(crate) fn new(
         payment_obligations: Vec<PaymentObligationData>,
         payjoin_proposals: Vec<(MessageId, BulletinBoardId, PayjoinProposal)>,
+        new_multi_party_payjoins: Vec<(BulletinBoardId, MessageId)>,
+        active_multi_party_payjoins: Vec<BulletinBoardId>,
         current_timestep: TimeStep,
+        wallet_id: WalletId,
     ) -> Self {
         Self {
             payment_obligations,
             payjoin_proposals,
+            active_multi_party_payjoins,
+            new_multi_party_payjoins,
             current_timestep,
+            wallet_id,
         }
     }
 }
@@ -186,6 +240,7 @@ fn get_payment_obligation_handled_outcome(
         time_left: deadline.0 as i32 - current_timestep.0 as i32,
     }
 }
+
 fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<PredictedOutcome> {
     let wallet_view = wallet_handle.wallet_view();
     let mut events = vec![];
@@ -383,6 +438,85 @@ impl Strategy for PayjoinStrategy {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct MultipartyPayjoinInitiatorStrategy;
+
+impl Strategy for MultipartyPayjoinInitiatorStrategy {
+    fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
+        if state.payment_obligations.is_empty() {
+            return vec![Action::Wait];
+        }
+        // TODO: if the sesion is on going do not intiate a new one
+        // TODO: this is scaffolding for now, peers in the future will evaluate if they should initiate a multi-party payjoin given the number of payment obligations
+        if state.wallet_id != WalletId(0) {
+            return vec![Action::Wait];
+        }
+
+        // TODO: only one multi-party payjoin session can be active at a time FOR NOW
+        let mut actions = vec![];
+        if !state.active_multi_party_payjoins.is_empty() {
+            // If we have an active session we should actively participate in it
+            debug_assert!(state.active_multi_party_payjoins.len() <= 1);
+            for bulletin_board_id in state.active_multi_party_payjoins.iter() {
+                actions.push(Action::ContinueParticipateMultiPartyPayjoin(
+                    *bulletin_board_id,
+                ));
+            }
+            return actions;
+        }
+
+        actions.push(Action::InitiateMultiPartyPayjoin(
+            state.payment_obligations.iter().map(|po| po.id).collect(),
+        ));
+
+        actions
+    }
+
+    fn clone_box(&self) -> Box<dyn Strategy> {
+        Box::new(self.clone())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MultipartyPayjoinParticipantStrategy;
+
+impl Strategy for MultipartyPayjoinParticipantStrategy {
+    fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
+        if state.payment_obligations.is_empty() {
+            return vec![Action::Wait];
+        }
+
+        let mut actions = vec![];
+        //TODO: Only one multi-party payjoin session can be initiated at a time FOR NOW
+
+        if let Some((bulletin_board_id, message_id)) = state.new_multi_party_payjoins.iter().next()
+        {
+            // TODO participate in one session at a time
+            if state.active_multi_party_payjoins.is_empty() {
+                for po in state.payment_obligations.iter() {
+                    actions.push(Action::ParticipateMultiPartyPayjoin((
+                        *message_id,
+                        *bulletin_board_id,
+                        po.id,
+                    )));
+                }
+            }
+        }
+
+        // Or continue to participate in the existing session
+        for bulletin_board_id in state.active_multi_party_payjoins.iter() {
+            actions.push(Action::ContinueParticipateMultiPartyPayjoin(
+                *bulletin_board_id,
+            ));
+        }
+        actions
+    }
+
+    fn clone_box(&self) -> Box<dyn Strategy> {
+        Box::new(self.clone())
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct CompositeStrategy {
     pub(crate) strategies: Vec<Box<dyn Strategy>>,
 }
@@ -413,6 +547,7 @@ pub(crate) struct CompositeScorer {
     pub(crate) initiate_payjoin_utility_factor: f64,
     pub(crate) respond_to_payjoin_utility_factor: f64,
     pub(crate) payment_obligation_utility_factor: f64,
+    pub(crate) multi_party_payjoin_utility_factor: f64,
 }
 
 impl CompositeScorer {
@@ -439,6 +574,12 @@ impl CompositeScorer {
                 PredictedOutcome::RespondToPayjoin(event) => {
                     score = score + event.score(self.respond_to_payjoin_utility_factor);
                 }
+                PredictedOutcome::InitiateMultiPartyPayjoin(event) => {
+                    score = score + event.score(self.multi_party_payjoin_utility_factor);
+                }
+                PredictedOutcome::ParticipateMultiPartyPayjoin(event) => {
+                    score = score + event.score(self.multi_party_payjoin_utility_factor);
+                }
             }
         }
         score
@@ -451,6 +592,10 @@ pub(crate) fn create_strategy(name: &str) -> Result<Box<dyn Strategy>, String> {
         "UnilateralSpender" => Ok(Box::new(UnilateralSpender)),
         "BatchSpender" => Ok(Box::new(BatchSpender)),
         "PayjoinStrategy" => Ok(Box::new(PayjoinStrategy)),
+        "MultipartyPayjoinInitiatorStrategy" => Ok(Box::new(MultipartyPayjoinInitiatorStrategy)),
+        "MultipartyPayjoinParticipantStrategy" => {
+            Ok(Box::new(MultipartyPayjoinParticipantStrategy))
+        }
         _ => Err(format!("Unknown strategy: {}", name)),
     }
 }

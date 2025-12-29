@@ -22,8 +22,8 @@ impl<'a> BulletinBoardHandle<'a> {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum BroadcastMessageType {
     InitiatePayjoin(PayjoinProposal),
-    ContributeInputs(Vec<Outpoint>),
-    ContributeOutputs(Vec<Output>),
+    ContributeInputs(Outpoint),
+    ContributeOutputs(Output),
     ReadyToSign(),
-    // TODO: witness?
+    // TODO: witness for multi-party payjoin?
 }

@@ -10,6 +10,8 @@ pub(crate) struct PayjoinProposal {
 pub(crate) enum MessageType {
     /// Initiate a cospend with the receiver of payment
     InitiatePayjoin(BulletinBoardId),
+    /// Initiate a multi-party payjoin
+    InitiateMultiPartyPayjoin(BulletinBoardId),
 }
 
 define_entity!(

@@ -27,6 +27,7 @@ pub struct ScorerConfig {
     pub initiate_payjoin_utility_factor: f64,
     pub respond_to_payjoin_utility_factor: f64,
     pub payment_obligation_utility_factor: f64,
+    pub multi_party_payjoin_utility_factor: f64,
 }
 
 impl Config {
@@ -35,7 +36,13 @@ impl Config {
         let config: Config = toml::from_str(&contents)?;
 
         // Validate strategy names
-        let valid_strategies = ["UnilateralSpender", "BatchSpender", "PayjoinStrategy"];
+        let valid_strategies = [
+            "UnilateralSpender",
+            "BatchSpender",
+            "PayjoinStrategy",
+            "MultipartyPayjoinInitiatorStrategy",
+            "MultipartyPayjoinParticipantStrategy",
+        ];
         for wallet_type in &config.wallet_types {
             for strategy in &wallet_type.strategies {
                 if !valid_strategies.contains(&strategy.as_str()) {

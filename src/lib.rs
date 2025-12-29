@@ -14,6 +14,8 @@ use rand_pcg::Pcg64;
 use crate::bulletin_board::BroadcastMessageType;
 use crate::bulletin_board::BulletinBoardData;
 use crate::bulletin_board::BulletinBoardId;
+use crate::message::MessageType;
+use crate::tx_contruction::MultiPartyPayjoinSession;
 use crate::{
     actions::{create_strategy, CompositeScorer, CompositeStrategy},
     blocks::{
@@ -40,6 +42,7 @@ mod economic_graph;
 mod graphviz;
 mod message;
 mod transaction;
+mod tx_contruction;
 mod wallet;
 
 #[derive(Debug, Clone)]
@@ -276,6 +279,9 @@ impl SimulationBuilder {
                 respond_to_payjoin_utility_factor: wallet_type
                     .scorer
                     .respond_to_payjoin_utility_factor,
+                multi_party_payjoin_utility_factor: wallet_type
+                    .scorer
+                    .multi_party_payjoin_utility_factor,
             };
 
             for _ in 0..wallet_type.count {
@@ -425,8 +431,14 @@ impl<'a> Simulation {
             .push(message);
     }
 
-    fn broadcast_message(&mut self, message: MessageData) {
-        self.messages.push(message);
+    fn broadcast_message(&mut self, to: WalletId, from: WalletId, message: MessageType) {
+        let id = MessageId(self.messages.len());
+        self.messages.push(MessageData {
+            id,
+            message,
+            from,
+            to,
+        });
     }
 
     // TODO remove
@@ -504,6 +516,8 @@ impl<'a> Simulation {
             txid_to_payment_obligation_ids: im::HashMap::<TxId, Vec<PaymentObligationId>>::default(
             ),
             handled_payment_obligations: OrdSet::<PaymentObligationId>::default(),
+            active_multi_party_payjoins:
+                im::HashMap::<BulletinBoardId, MultiPartyPayjoinSession>::default(),
         });
 
         let id = WalletId(self.wallet_data.len());
@@ -762,6 +776,7 @@ mod tests {
                 initiate_payjoin_utility_factor: 2.0,
                 respond_to_payjoin_utility_factor: 5.0,
                 payment_obligation_utility_factor: 1.0,
+                multi_party_payjoin_utility_factor: 0.0,
             },
         }];
         let mut sim = SimulationBuilder::new(42, wallet_types, 20, 1, 10).build();
@@ -804,6 +819,7 @@ mod tests {
                 initiate_payjoin_utility_factor: 2.0,
                 respond_to_payjoin_utility_factor: 5.0,
                 payment_obligation_utility_factor: 1.0,
+                multi_party_payjoin_utility_factor: 0.0,
             },
         }];
         let mut sim = SimulationBuilder::new(42, wallet_types, 20, 1, 10).build();
@@ -814,6 +830,7 @@ mod tests {
             initiate_payjoin_utility_factor: 2.0,
             payment_obligation_utility_factor: 1.0,
             respond_to_payjoin_utility_factor: 5.0,
+            multi_party_payjoin_utility_factor: 0.0,
         };
         let alice_strategies = vec![
             create_strategy("UnilateralSpender").unwrap(),

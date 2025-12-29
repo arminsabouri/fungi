@@ -1,8 +1,12 @@
 use crate::{
     actions::{Action, CompositeScorer, CompositeStrategy, WalletView},
-    blocks::{BroadcastSetHandleMut, BroadcastSetId},
+    blocks::BroadcastSetId,
     bulletin_board::{BroadcastMessageType, BulletinBoardId},
-    message::{MessageData, MessageId, MessageType, PayjoinProposal},
+    message::{MessageId, MessageType, PayjoinProposal},
+    tx_contruction::{
+        MultiPartyPayjoinSession, SentBulletinBoardId, SentInputs, SentOutputs, SentReadyToSign,
+        TxConstructionState,
+    },
     Simulation, TimeStep,
 };
 use bdk_coin_select::{
@@ -52,6 +56,8 @@ define_entity_info!(Wallet, {
 
         /// Set of payment obligations that have been handled
         pub(crate) handled_payment_obligations: OrdSet<PaymentObligationId>,
+        /// Set of multi-party payjoin sessions that this wallet is participating in
+        pub(crate) active_multi_party_payjoins: HashMap<BulletinBoardId, MultiPartyPayjoinSession>,
     }
 );
 
@@ -289,12 +295,11 @@ impl<'a> WalletHandleMut<'a> {
         &mut self,
         // Message id is serving as a proxy for payjoin id
         payment_obligation: &PaymentObligationId,
-    ) -> MessageData {
+    ) -> BulletinBoardId {
         let payment_obligation_data = payment_obligation.with(self.sim).data().clone();
-        let message_id = MessageId(self.sim.messages.len());
         let change_addr = self.new_address();
         let mut tx_template =
-            self.construct_transaction_template(&[*payment_obligation], &change_addr);
+            self.construct_transaction_template(&[payment_obligation_data.id], &change_addr);
         self.ack_transaction(&mut tx_template);
         debug_assert!(tx_template.wallet_acks.contains(&self.id));
         let payjoin_proposal = PayjoinProposal {
@@ -316,11 +321,152 @@ impl<'a> WalletHandleMut<'a> {
             bulletin_board_id,
             BroadcastMessageType::InitiatePayjoin(payjoin_proposal),
         );
-        MessageData {
-            id: message_id,
-            from: self.id,
-            to: payment_obligation_data.to,
-            message: MessageType::InitiatePayjoin(bulletin_board_id),
+        bulletin_board_id
+    }
+
+    fn create_multi_party_payjoin_session(&mut self, po_ids: &Vec<PaymentObligationId>) {
+        if self.id.0 != 0 {
+            return; // TODO For now the first wallet is the leader
+        }
+        // First we create the bulletin board
+        let bulletin_board_id = self.sim.create_bulletin_board();
+        // Then we invite all members to join
+        for po_id in po_ids.iter() {
+            let recv = po_id.with(&self.sim).data().to;
+            self.sim.broadcast_message(
+                recv,
+                self.id,
+                MessageType::InitiateMultiPartyPayjoin(bulletin_board_id),
+            );
+        }
+        let change_addr = self.new_address();
+        let tx_template = self.construct_transaction_template(po_ids, &change_addr);
+        let session = SentBulletinBoardId::new(
+            self.sim,
+            bulletin_board_id,
+            tx_template.clone(),
+            po_ids.len() as u16,
+        );
+
+        session.send_inputs();
+        info!("Sent inputs for multi party payjoin session");
+
+        let session = MultiPartyPayjoinSession {
+            payment_obligation_ids: po_ids.clone(),
+            tx_template,
+            state: TxConstructionState::SentInputs,
+        };
+        self.info_mut()
+            .active_multi_party_payjoins
+            .insert(bulletin_board_id, session);
+    }
+
+    fn participate_in_multi_party_payjoin(&mut self, bulletin_board_id: &BulletinBoardId) {
+        let session = self
+            .info()
+            .active_multi_party_payjoins
+            .get(bulletin_board_id)
+            .unwrap();
+        // TODO: construct tx template and contribute inputs / locking the po's and utxos to this session
+        let state = session.state.clone();
+        log::info!(
+            "wallet id: {:?} participating in multi party payjoin session with state: {:?}",
+            self.id,
+            state
+        );
+        let n = 2;
+
+        match state {
+            TxConstructionState::SentBulletinBoardId => {
+                let t = SentBulletinBoardId::new(
+                    self.sim,
+                    *bulletin_board_id,
+                    session.tx_template.clone(),
+                    n,
+                );
+                t.send_inputs();
+                let mut updated_session = session.clone();
+                updated_session.state = TxConstructionState::SentInputs;
+                self.info_mut()
+                    .active_multi_party_payjoins
+                    .insert(*bulletin_board_id, updated_session);
+                log::info!(
+                    "Sent inputs for multi party payjoin session with bulletin board id: {:?}",
+                    bulletin_board_id
+                );
+                return;
+            }
+            TxConstructionState::SentInputs => {
+                let t =
+                    SentInputs::new(self.sim, *bulletin_board_id, session.tx_template.clone(), n);
+                let res = t.have_enough_inputs();
+                if let Some(_) = res {
+                    let mut updated_session = session.clone();
+                    updated_session.state = TxConstructionState::SentOutputs;
+                    self.info_mut()
+                        .active_multi_party_payjoins
+                        .insert(*bulletin_board_id, updated_session);
+                    log::info!(
+                        "Sent outputs for multi party payjoin session with bulletin board id: {:?}",
+                        bulletin_board_id
+                    );
+                }
+                return;
+            }
+            TxConstructionState::SentOutputs => {
+                let t =
+                    SentOutputs::new(self.sim, *bulletin_board_id, session.tx_template.clone(), n);
+                let res = t.have_enough_outputs();
+                if let Some(_) = res {
+                    let mut updated_session = session.clone();
+                    updated_session.state = TxConstructionState::SentReadyToSign;
+                    self.info_mut()
+                        .active_multi_party_payjoins
+                        .insert(*bulletin_board_id, updated_session);
+                    log::info!(
+                        "Sent ready to sign for multi party payjoin session with bulletin board id: {:?}",
+                        bulletin_board_id
+                    );
+                }
+                return;
+            }
+            TxConstructionState::SentReadyToSign => {
+                let t = SentReadyToSign::new(
+                    self.sim,
+                    *bulletin_board_id,
+                    session.tx_template.clone(),
+                    n,
+                );
+                let res = t.have_enough_ready_to_sign();
+                if let Some(tx) = res {
+                    // TODO: only the leader should broadcast the tx right now
+                    if self.id.0 != 0 {
+                        return;
+                    }
+                    println!("tx: {:?}", tx);
+                    let tx_id = self.spend_tx(tx);
+                    log::info!(
+                        "Multi party payjoin session successful with bulletin board id: {:?}",
+                        bulletin_board_id
+                    );
+                    self.broadcast(std::iter::once(tx_id));
+                    // Update session state to success
+                    let mut updated_session = session.clone();
+                    updated_session.state = TxConstructionState::Success(tx_id);
+                    self.info_mut()
+                        .active_multi_party_payjoins
+                        .insert(*bulletin_board_id, updated_session);
+                    log::info!(
+                        "Multi party payjoin session successful with bulletin board id: {:?}",
+                        bulletin_board_id
+                    );
+                }
+                return;
+            }
+            TxConstructionState::Success(tx_id) => {
+                log::info!("Multi party payjoin session successful: {:?}", tx_id);
+                return;
+            }
         }
     }
 
@@ -356,6 +502,29 @@ impl<'a> WalletHandleMut<'a> {
                         None
                     }
                 }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // New multi party payjoin sessions
+        let new_multi_party_payjoins = messages
+            .iter()
+            .filter_map(|message| match &message.message {
+                MessageType::InitiateMultiPartyPayjoin(bulletin_board_id) => {
+                    Some((*bulletin_board_id, message.id))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        // Already active multi party payjoin sessions
+        let active_mp_pj_sessions = wallet_info
+            .active_multi_party_payjoins
+            .iter()
+            .filter_map(|(bulletin_board_id, session)| match &session.state {
+                TxConstructionState::SentBulletinBoardId
+                | TxConstructionState::SentInputs
+                | TxConstructionState::SentOutputs
+                | TxConstructionState::SentReadyToSign => Some(*bulletin_board_id),
+                _ => None,
             })
             .collect::<Vec<_>>();
 
@@ -382,7 +551,11 @@ impl<'a> WalletHandleMut<'a> {
         WalletView::new(
             payment_obligations,
             payjoin_proposals,
+            new_multi_party_payjoins,
+            active_mp_pj_sessions,
             self.sim.current_timestep,
+            // TODO active mp pj sessions
+            self.id,
         )
     }
 
@@ -396,8 +569,12 @@ impl<'a> WalletHandleMut<'a> {
                 self.handle_payment_obligations(po_ids);
             }
             Action::InitiatePayjoin(po) => {
-                let message = self.create_payjoin(po);
-                self.sim.broadcast_message(message);
+                let bulletin_board_id = self.create_payjoin(po);
+                self.sim.broadcast_message(
+                    po.with(&self.sim).data().to,
+                    self.id,
+                    MessageType::InitiatePayjoin(bulletin_board_id),
+                );
             }
             Action::RespondToPayjoin(payjoin_proposal, po, bulletin_board_id, message_id) => {
                 let tx_id = self.participate_in_payjoin(
@@ -407,6 +584,34 @@ impl<'a> WalletHandleMut<'a> {
                     po,
                 );
                 self.broadcast(vec![tx_id]);
+            }
+            Action::InitiateMultiPartyPayjoin(po_ids) => {
+                self.create_multi_party_payjoin_session(po_ids);
+            }
+            Action::ParticipateMultiPartyPayjoin((
+                message_id,
+                bulletin_board_id,
+                payment_obligation_id,
+            )) => {
+                // Create new session -- assuming this doesnt exist already
+                let change_addr = self.new_address();
+                let tx_template =
+                    self.construct_transaction_template(&[*payment_obligation_id], &change_addr);
+                self.info_mut().active_multi_party_payjoins.insert(
+                    *bulletin_board_id,
+                    MultiPartyPayjoinSession {
+                        payment_obligation_ids: vec![*payment_obligation_id],
+                        tx_template,
+                        // TODO: better state for someone who has not started the session yet
+                        state: TxConstructionState::SentBulletinBoardId,
+                    },
+                );
+                // Mark message as processed
+                self.data_mut().messages_processed.insert(*message_id);
+                self.participate_in_multi_party_payjoin(bulletin_board_id);
+            }
+            Action::ContinueParticipateMultiPartyPayjoin(bulletin_board_id) => {
+                self.participate_in_multi_party_payjoin(bulletin_board_id);
             }
         }
     }
@@ -467,10 +672,7 @@ impl<'a> WalletHandleMut<'a> {
         TxHandle::new(self.sim, id)
     }
 
-    pub(crate) fn broadcast(
-        &'a mut self,
-        txs: impl IntoIterator<Item = TxId>,
-    ) -> BroadcastSetHandleMut<'a> {
+    pub(crate) fn broadcast(&mut self, txs: impl IntoIterator<Item = TxId>) -> BroadcastSetId {
         let mut wallet_info = self.info().clone();
 
         let txs = Vector::from_iter(txs);
@@ -483,7 +685,8 @@ impl<'a> WalletHandleMut<'a> {
         let data = self.data_mut();
         data.last_wallet_info_id = id;
 
-        self.sim.broadcast(txs)
+        let res = self.sim.broadcast(txs);
+        res.id
     }
 }
 
