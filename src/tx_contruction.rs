@@ -30,7 +30,7 @@ pub(crate) enum TxConstructionState {
     SentInputs,
     SentOutputs,
     SentReadyToSign,
-    Success(TxId),
+    Success(Option<TxId>),
 }
 
 #[derive(Debug)]

@@ -62,6 +62,7 @@ define_entity_info!(Wallet, {
         /// Set of multi-party payjoin sessions that this wallet is participating in
         pub(crate) active_multi_party_payjoins: HashMap<BulletinBoardId, MultiPartyPayjoinSession>,
         /// UTXOs registered in the order book by this wallet
+        // TODO: this should be moved to wallet data
         pub(crate) registered_inputs: OrdSet<Outpoint>,
     }
 );
@@ -425,22 +426,26 @@ impl<'a> WalletHandleMut<'a> {
             TxConstructionState::SentReadyToSign => {
                 let t = SentReadyToSign::new(self.sim, *bulletin_board_id);
                 let res = t.have_enough_ready_to_sign();
-                info!(">>> have enough ready to sign: {:?}, id: {:?}", res, self.id);
                 if let Some(tx) = res {
-                    // TODO: only the leader should broadcast the tx right now
                     if self.id.0 != 0 {
+                        let mut updated_session = session.clone();
+                        updated_session.state = TxConstructionState::Success(None);
+
+                        // TODO: update latest wallet info index in wallet data
+                        self.info_mut()
+                            .active_multi_party_payjoins
+                            .insert(*bulletin_board_id, updated_session);
                         return;
                     }
-                    println!("tx: {:?}", tx);
                     let tx_id = self.spend_tx(tx);
-                    log::info!(
-                        "Multi party payjoin session successful with bulletin board id: {:?}",
-                        bulletin_board_id
-                    );
                     self.broadcast(std::iter::once(tx_id));
-                    // Update session state to success
+                    let po_ids = session.payment_obligation_ids.clone();
+                    self.info_mut()
+                        .txid_to_payment_obligation_ids
+                        .insert(tx_id, po_ids);
+                    // TODO: update latest wallet info index in wallet data
                     let mut updated_session = session.clone();
-                    updated_session.state = TxConstructionState::Success(tx_id);
+                    updated_session.state = TxConstructionState::Success(Some(tx_id));
                     self.info_mut()
                         .active_multi_party_payjoins
                         .insert(*bulletin_board_id, updated_session);
@@ -605,8 +610,7 @@ impl<'a> WalletHandleMut<'a> {
         }
 
         // Send taker's inputs to the bulletin board
-        let session =
-            SentBulletinBoardId::new(self.sim, bulletin_board_id, tx_template.clone());
+        let session = SentBulletinBoardId::new(self.sim, bulletin_board_id, tx_template.clone());
         session.send_inputs();
         info!("Sent inputs for cospend session");
 
@@ -626,7 +630,10 @@ impl<'a> WalletHandleMut<'a> {
             return;
         }
         self.info_mut().registered_inputs.insert(*outpoint);
-        info!("Wallet {:?} registered input {:?} in order book", self.id, outpoint);
+        info!(
+            "Wallet {:?} registered input {:?} in order book",
+            self.id, outpoint
+        );
     }
 
     pub(crate) fn do_action(&'a mut self, action: &Action) {

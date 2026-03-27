@@ -204,36 +204,42 @@ impl<'a> BroadcastSetHandleMut<'a> {
                             {
                                 info.handled_payment_obligations
                                     .extend(payment_obligation_ids.iter().map(|id| *id));
-                            } else {
-                                // Only check payjoin lookups if the transaction isn't already
-                                // in txid_to_handle_payment_obligation to avoid duplicate handling
-                                // Check if this input's outpoint is in a payjoin
-                                if let Some(cospend_id) = info
-                                    .unconfirmed_txos_in_payjoins
-                                    .get(&input.data().outpoint)
+                            } else if let Some(cospend_id) = info
+                                .unconfirmed_txos_in_payjoins
+                                .get(&input.data().outpoint)
+                            {
+                                if let Some((payment_obligation_id, _)) = info
+                                    .initiated_payjoins
+                                    .iter()
+                                    .find(|(_, c)| **c == *cospend_id)
                                 {
-                                    // Check initiated payjoins
-                                    if let Some((payment_obligation_id, _)) = info
-                                        .initiated_payjoins
+                                    info.handled_payment_obligations
+                                        .insert(*payment_obligation_id);
+                                } else if let Some((payment_obligation_id, _)) = info
+                                    .received_payjoins
+                                    .iter()
+                                    .find(|(_, c)| **c == *cospend_id)
+                                {
+                                    info.handled_payment_obligations
+                                        .insert(*payment_obligation_id);
+                                } else {
+                                    panic!(
+                                        "No payment obligation found for cospend: {:?}",
+                                        cospend_id
+                                    );
+                                }
+                            } else {
+                                for (_, mppj_session) in info.active_multi_party_payjoins.iter() {
+                                    if mppj_session
+                                        .tx_template
+                                        .inputs
                                         .iter()
-                                        .find(|(_, c)| **c == *cospend_id)
+                                        .any(|i| i.outpoint == input.data().outpoint)
                                     {
-                                        info.handled_payment_obligations
-                                            .insert(*payment_obligation_id);
-                                    }
-                                    // Check received payjoins
-                                    else if let Some((payment_obligation_id, _)) = info
-                                        .received_payjoins
-                                        .iter()
-                                        .find(|(_, c)| **c == *cospend_id)
-                                    {
-                                        info.handled_payment_obligations
-                                            .insert(*payment_obligation_id);
-                                    } else {
-                                        panic!(
-                                            "No payment obligation found for cospend: {:?}",
-                                            cospend_id
+                                        info.handled_payment_obligations.extend(
+                                            mppj_session.payment_obligation_ids.iter().copied(),
                                         );
+                                        break;
                                     }
                                 }
                             }
