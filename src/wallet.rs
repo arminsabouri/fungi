@@ -657,10 +657,7 @@ impl<'a> WalletHandleMut<'a> {
                 );
                 self.broadcast(vec![tx_id]);
             }
-            Action::InitiateMultiPartyPayjoin(po_ids) => {
-                self.create_multi_party_payjoin_session(po_ids);
-            }
-            Action::ParticipateMultiPartyPayjoin((
+            Action::AcceptCospendProposal((
                 message_id,
                 bulletin_board_id,
                 payment_obligation_id,
@@ -682,7 +679,7 @@ impl<'a> WalletHandleMut<'a> {
                 self.data_mut().messages_processed.insert(*message_id);
                 self.participate_in_multi_party_payjoin(bulletin_board_id);
             }
-            Action::ContinueParticipateMultiPartyPayjoin(bulletin_board_id) => {
+            Action::ContinueParticipateInCospend(bulletin_board_id) => {
                 self.participate_in_multi_party_payjoin(bulletin_board_id);
             }
             Action::CreateCospendProposal(po_ids) => {
