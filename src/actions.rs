@@ -6,7 +6,7 @@ use crate::{
     bulletin_board::BulletinBoardId,
     cospend::UtxoWithAmount,
     message::{MessageId, PayjoinProposal},
-    transaction::TxId,
+    transaction::{Outpoint, TxId},
     wallet::{PaymentObligationData, PaymentObligationId, WalletHandleMut, WalletId},
     Simulation, TimeStep,
 };
@@ -63,6 +63,8 @@ pub(crate) enum Action {
     ContinueParticipateMultiPartyPayjoin(BulletinBoardId),
     /// Create a cospend proposal: batch payment obligations and pair with order book UTXOs
     CreateCospendProposal(Vec<PaymentObligationId>),
+    /// Register a single UTXO in the order book (maker action)
+    RegisterInput(Outpoint),
     /// Do nothing. There may be better oppurtunities to spend a payment obligation or participate in a payjoin.
     Wait,
 }
@@ -77,6 +79,7 @@ pub(crate) enum PredictedOutcome {
     ParticipateMultiPartyPayjoin(ParticipateMultiPartyPayjoinOutcome),
     Consolidation(ConsolidationOutcome),
     CreateCospendProposal(CreateCospendProposalOutcome),
+    RegisterInput(RegisterInputOutcome),
 }
 
 #[derive(Debug)]
@@ -214,6 +217,26 @@ impl CreateCospendProposalOutcome {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct RegisterInputOutcome {
+    /// Number of payment obligations the wallet currently has
+    num_payment_obligations: usize,
+    /// Number of inputs already registered (including this one)
+    num_registered_inputs: usize,
+}
+
+impl RegisterInputOutcome {
+    fn cost(&self, coordination_weight: f64) -> ActionCost {
+        // More payment obligations = higher cost (wallet should be spending, not registering)
+        // TODO: this should be the cost of missing those payments bc we dont have enought inputs to spend
+        // So 
+        let obligation_pressure = self.num_payment_obligations as f64 * coordination_weight;
+        // Registering additional inputs is increasingly costly
+        let multi_registration_cost = (self.num_registered_inputs as f64).powi(2) * coordination_weight;
+        ActionCost(obligation_pressure + multi_registration_cost)
+    }
+}
+
 /// State of the wallet that can be used to potential enumerate actions
 #[derive(Debug)]
 pub(crate) struct WalletView {
@@ -224,7 +247,7 @@ pub(crate) struct WalletView {
     current_timestep: TimeStep,
     wallet_id: WalletId,
     utxos: Vec<UtxoWithAmount>,
-    // TODO: feerate, cospend oppurtunities, etc.
+    registered_inputs: Vec<Outpoint>,
 }
 
 impl WalletView {
@@ -236,6 +259,7 @@ impl WalletView {
         current_timestep: TimeStep,
         wallet_id: WalletId,
         utxos: Vec<UtxoWithAmount>,
+        registered_inputs: Vec<Outpoint>,
     ) -> Self {
         Self {
             payment_obligations,
@@ -245,6 +269,7 @@ impl WalletView {
             current_timestep,
             wallet_id,
             utxos,
+            registered_inputs,
         }
     }
 }
@@ -344,6 +369,14 @@ fn simulate_one_action(wallet_handle: &WalletHandleMut, action: &Action) -> Vec<
                 base_cost: fee_paid_total,
             },
         ));
+    }
+
+    if matches!(action, Action::RegisterInput(_)) {
+        let num_registered = wallet_view.registered_inputs.len() + 1;
+        events.push(PredictedOutcome::RegisterInput(RegisterInputOutcome {
+            num_payment_obligations: wallet_view.payment_obligations.len(),
+            num_registered_inputs: num_registered,
+        }));
     }
 
     // Check if the wallet initiated a payjoin
@@ -535,16 +568,18 @@ pub(crate) struct MakerStrategy;
 
 impl Strategy for MakerStrategy {
     fn enumerate_candidate_actions(&self, state: &WalletView) -> Vec<Action> {
-        if state.payment_obligations.is_empty() {
-            return vec![Action::Wait];
+        let mut actions = vec![];
+
+        // Continue to participate in active sessions
+        for bulletin_board_id in state.active_multi_party_payjoins.iter() {
+            actions.push(Action::ContinueParticipateMultiPartyPayjoin(
+                *bulletin_board_id,
+            ));
         }
 
-        let mut actions = vec![];
-        //TODO: Only one multi-party payjoin session can be initiated at a time FOR NOW
-
+        // Accept new invitations
         if let Some((bulletin_board_id, message_id)) = state.new_multi_party_payjoins.iter().next()
         {
-            // TODO participate in one session at a time
             if state.active_multi_party_payjoins.is_empty() {
                 for po in state.payment_obligations.iter() {
                     actions.push(Action::ParticipateMultiPartyPayjoin((
@@ -556,11 +591,15 @@ impl Strategy for MakerStrategy {
             }
         }
 
-        // Or continue to participate in the existing session
-        for bulletin_board_id in state.active_multi_party_payjoins.iter() {
-            actions.push(Action::ContinueParticipateMultiPartyPayjoin(
-                *bulletin_board_id,
-            ));
+        // Register unregistered UTXOs in the order book (one action per UTXO)
+        for utxo in state.utxos.iter() {
+            if !state.registered_inputs.contains(&utxo.outpoint) {
+                actions.push(Action::RegisterInput(utxo.outpoint));
+            }
+        }
+
+        if actions.is_empty() {
+            actions.push(Action::Wait);
         }
         actions
     }
@@ -677,6 +716,9 @@ impl CompositeScorer {
                 PredictedOutcome::CreateCospendProposal(event) => {
                     cost = cost + event.cost(self.privacy_weight);
                 }
+                PredictedOutcome::RegisterInput(event) => {
+                    cost = cost + event.cost(self.coordination_weight);
+                }
             }
         }
         cost
@@ -714,7 +756,7 @@ mod tests {
             vec![],
             TimeStep(0),
             WalletId(0),
-            // TODO: populate utxos
+            vec![],
             vec![],
         )
     }
@@ -758,6 +800,7 @@ mod tests {
             vec![],
             TimeStep(0),
             WalletId(0),
+            vec![],
             vec![],
         );
 
@@ -941,6 +984,7 @@ mod tests {
             TimeStep(0),
             WalletId(0),
             vec![],
+            vec![],
         );
 
         let actions = strategy.enumerate_candidate_actions(&view);
@@ -972,6 +1016,7 @@ mod tests {
             vec![],                                   // No active sessions yet
             TimeStep(0),
             WalletId(1),
+            vec![],
             vec![],
         );
 
@@ -1005,6 +1050,7 @@ mod tests {
             TimeStep(0),
             WalletId(1),
             vec![],
+            vec![],
         );
 
         let actions = strategy.enumerate_candidate_actions(&view);
@@ -1036,6 +1082,7 @@ mod tests {
             vec![BulletinBoardId(1)],
             TimeStep(0),
             WalletId(1),
+            vec![],
             vec![],
         );
 
